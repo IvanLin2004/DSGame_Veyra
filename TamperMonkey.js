@@ -30,7 +30,9 @@
     let autoFinishQuestEnabled = localStorage.getItem('autoFinishQuestEnabled') !== 'false';
     let autoMobFarmEnabled = localStorage.getItem('autoMobFarmEnabled') === 'true';
     let autoMobFarmDamage = localStorage.getItem('autoMobFarmDamage') || '1000000';
+    let autoMobFarmBaseDamage = localStorage.getItem('autoMobFarmBaseDamage') || '10000';
     let autoMobFarmWaveTarget = localStorage.getItem('autoMobFarmWaveTarget') || 'current';
+    let autoMobFarmMobTarget = localStorage.getItem('autoMobFarmMobTarget') || '';
     let autoMobFarmLastGate = localStorage.getItem('autoMobFarmLastGate') || '';
     let targetStamina = localStorage.getItem('staminaTarget') || '80';
     let minChap = localStorage.getItem('staminaMinChap') || '1';
@@ -963,8 +965,28 @@
                 return idMatch ? idMatch[1] : '';
             }
 
-            function findJoinBattleControl(doc, blockedBattleIds) {
+            function findJoinBattleControl(doc, blockedBattleIds, mobTargetQuery = '') {
                 const controls = Array.from(doc.querySelectorAll('a, button, input[type="button"], input[type="submit"]'));
+                const normalizedTargets = String(mobTargetQuery || '')
+                    .split(/[|,]/)
+                    .map((term) => term.trim().toLowerCase())
+                    .filter(Boolean);
+
+                const extractMonsterNameFromControl = (el) => {
+                    const card = el.closest('.monster-card, [data-name], .mon, .monster, .monster-row');
+                    if (!card) {
+                        return '';
+                    }
+
+                    const byData = (card.getAttribute('data-name') || card.dataset?.name || '').trim();
+                    if (byData) {
+                        return byData;
+                    }
+
+                    const nameNode = card.querySelector('.monster-name, .name, h3, h4, .title');
+                    return nameNode ? (nameNode.textContent || '').trim() : '';
+                };
+
                 const matches = controls.filter((el) => {
                     const text = (el.textContent || el.value || '').trim().toUpperCase();
                     const isJoin = text.includes('JOIN BATTLE');
@@ -975,6 +997,14 @@
 
                     if (!looksLikeJoin || el.disabled) {
                         return false;
+                    }
+
+                    if (normalizedTargets.length > 0) {
+                        const monsterName = extractMonsterNameFromControl(el).toLowerCase();
+                        const matched = monsterName && normalizedTargets.some((target) => monsterName.includes(target));
+                        if (!matched) {
+                            return false;
+                        }
                     }
 
                     const style = doc.defaultView ? doc.defaultView.getComputedStyle(el) : null;
@@ -1015,12 +1045,13 @@
             }
 
             function findAttackControl(doc) {
-                const controls = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], a'));
+                const controls = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], a, .attack-btn, [role="button"], [onclick]'));
                 return controls.find((el) => {
                     const text = (el.textContent || el.value || '').trim().toUpperCase();
+                    const isUiToggle = text.includes('ATTACK FX') || text.includes('REDUCE FLASHES') || text.includes('AUTO DIE IN');
                     const looksLikeAttack = text.includes('ATTACK') || text.includes('DEAL DAMAGE') || text === 'HIT';
 
-                    if (!looksLikeAttack || el.disabled) {
+                    if (!looksLikeAttack || isUiToggle || el.disabled) {
                         return false;
                     }
 
@@ -1035,7 +1066,7 @@
             }
 
             function findSlashControl(doc) {
-                const controls = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], a'));
+                const controls = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], a, .attack-btn, [role="button"], [onclick]'));
 
                 const pickVisibleEnabled = (predicate) => controls.find((el) => {
                     const text = (el.textContent || el.value || '').trim().toUpperCase();
@@ -1056,14 +1087,114 @@
                 return pickVisibleEnabled((t) => t === 'SLASH') || pickVisibleEnabled((t) => t.includes('POWER SLASH'));
             }
 
+            function parseSlashTierFromText(text) {
+                const t = String(text || '').toUpperCase();
+                if (t.includes('LEGENDARY SLASH')) {
+                    return { name: 'Legendary Slash', multiplier: 200 };
+                }
+                if (t.includes('ULTIMATE SLASH')) {
+                    return { name: 'Ultimate Slash', multiplier: 100 };
+                }
+                if (t.includes('HEROIC SLASH')) {
+                    return { name: 'Heroic Slash', multiplier: 50 };
+                }
+                if (t.includes('POWER SLASH')) {
+                    return { name: 'Power Slash', multiplier: 10 };
+                }
+                if (/\bSLASH\b/.test(t)) {
+                    return { name: 'Slash', multiplier: 1 };
+                }
+                return null;
+            }
+
+            function findBestSlashControl(doc, currentDamage, targetDamage, baseDamage) {
+                const controls = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], a, .attack-btn, [role="button"], [onclick]'));
+                const current = typeof currentDamage === 'number' && !isNaN(currentDamage) ? currentDamage : null;
+                const target = typeof targetDamage === 'number' && !isNaN(targetDamage) ? targetDamage : null;
+                const base = typeof baseDamage === 'number' && !isNaN(baseDamage) ? Math.max(1, baseDamage) : null;
+
+                const entries = controls
+                    .map((el) => {
+                        const text = (el.textContent || el.value || '').trim();
+                        const tier = parseSlashTierFromText(text);
+                        if (!tier || el.disabled) {
+                            return null;
+                        }
+
+                        const style = doc.defaultView ? doc.defaultView.getComputedStyle(el) : null;
+                        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none')) {
+                            return null;
+                        }
+
+                        const rect = el.getBoundingClientRect();
+                        if (!(rect.width > 0 && rect.height > 0)) {
+                            return null;
+                        }
+
+                        return {
+                            el,
+                            name: tier.name,
+                            multiplier: tier.multiplier
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.multiplier - a.multiplier);
+
+                if (entries.length === 0) {
+                    return null;
+                }
+
+                if (current === null || target === null || base === null) {
+                    return entries[0];
+                }
+
+                const remaining = Math.max(0, target - current);
+                if (remaining <= 0) {
+                    return null;
+                }
+
+                const bestFit = entries.find((entry) => (base * entry.multiplier) <= remaining);
+                if (bestFit) {
+                    return bestFit;
+                }
+
+                // If all tiers overshoot remaining, use the smallest available tier.
+                return entries.slice().sort((a, b) => a.multiplier - b.multiplier)[0] || null;
+            }
+
             function parseCurrentBattleDamage(doc) {
                 const text = ((doc.body && doc.body.innerText) || '');
-                const match = text.match(/DMG\s*:\s*([\d,]+)/i);
+                const match = text.match(/DMG\s*[:：]\s*([\d,]+)/i);
                 if (!match) {
                     return null;
                 }
                 const value = parseInt((match[1] || '').replace(/,/g, ''), 10);
                 return isNaN(value) ? null : value;
+            }
+
+            function safeControlClick(el) {
+                if (!el) {
+                    return false;
+                }
+
+                try {
+                    if (typeof el.click === 'function') {
+                        el.click();
+                        return true;
+                    }
+                } catch (_err) {
+                    // Fall through to dispatched events.
+                }
+
+                try {
+                    const opts = { bubbles: true, cancelable: true, view: window };
+                    el.dispatchEvent(new MouseEvent('mousedown', opts));
+                    el.dispatchEvent(new MouseEvent('mouseup', opts));
+                    el.dispatchEvent(new MouseEvent('click', opts));
+                    return true;
+                } catch (_err) {
+                    return false;
+                }
             }
 
             function battleLooksFinished(doc) {
@@ -1126,6 +1257,49 @@
                 damageInput.style.marginBottom = '8px';
                 damageInput.style.color = 'black';
                 wrap.appendChild(damageInput);
+
+                const baseDamageLabel = document.createElement('label');
+                baseDamageLabel.textContent = 'Base Damage:';
+                baseDamageLabel.style.display = 'block';
+                baseDamageLabel.style.marginBottom = '5px';
+                baseDamageLabel.style.fontWeight = 'bold';
+                baseDamageLabel.style.color = 'black';
+                wrap.appendChild(baseDamageLabel);
+
+                const baseDamageInput = document.createElement('input');
+                baseDamageInput.type = 'number';
+                baseDamageInput.min = '1';
+                baseDamageInput.step = '1';
+                baseDamageInput.value = String(Math.max(1, parseInt(autoMobFarmBaseDamage, 10) || 1));
+                baseDamageInput.style.width = '100%';
+                baseDamageInput.style.padding = '8px';
+                baseDamageInput.style.border = '1px solid #aaa';
+                baseDamageInput.style.borderRadius = '4px';
+                baseDamageInput.style.boxSizing = 'border-box';
+                baseDamageInput.style.marginBottom = '8px';
+                baseDamageInput.style.color = 'black';
+                wrap.appendChild(baseDamageInput);
+
+                const mobTargetLabel = document.createElement('label');
+                mobTargetLabel.textContent = 'Target Mob (name contains):';
+                mobTargetLabel.style.display = 'block';
+                mobTargetLabel.style.marginBottom = '5px';
+                mobTargetLabel.style.fontWeight = 'bold';
+                mobTargetLabel.style.color = 'black';
+                wrap.appendChild(mobTargetLabel);
+
+                const mobTargetInput = document.createElement('input');
+                mobTargetInput.type = 'text';
+                mobTargetInput.value = autoMobFarmMobTarget;
+                mobTargetInput.placeholder = 'e.g. goblin|orc or goblin,orc';
+                mobTargetInput.style.width = '100%';
+                mobTargetInput.style.padding = '8px';
+                mobTargetInput.style.border = '1px solid #aaa';
+                mobTargetInput.style.borderRadius = '4px';
+                mobTargetInput.style.boxSizing = 'border-box';
+                mobTargetInput.style.marginBottom = '8px';
+                mobTargetInput.style.color = 'black';
+                wrap.appendChild(mobTargetInput);
 
                 const waveLabel = document.createElement('label');
                 waveLabel.textContent = 'Target Wave:';
@@ -1196,6 +1370,27 @@
                     autoMobFarmDamage = String(value);
                     localStorage.setItem('autoMobFarmDamage', autoMobFarmDamage);
                     return value;
+                }
+
+                function getConfiguredBaseDamage() {
+                    const value = Math.max(1, parseInt(baseDamageInput.value, 10) || 1);
+                    baseDamageInput.value = String(value);
+                    autoMobFarmBaseDamage = String(value);
+                    localStorage.setItem('autoMobFarmBaseDamage', autoMobFarmBaseDamage);
+                    return value;
+                }
+
+                function getConfiguredMobTarget() {
+                    autoMobFarmMobTarget = String(mobTargetInput.value || '').trim();
+                    localStorage.setItem('autoMobFarmMobTarget', autoMobFarmMobTarget);
+                    return autoMobFarmMobTarget;
+                }
+
+                function parseConfiguredMobTargets(raw) {
+                    return String(raw || '')
+                        .split(/[|,]/)
+                        .map((term) => term.trim())
+                        .filter(Boolean);
                 }
 
                 function getConfiguredWaveTarget() {
@@ -1297,6 +1492,19 @@
                     status.textContent = `Damage set to ${autoMobFarmDamage}.`;
                 });
 
+                baseDamageInput.addEventListener('change', function() {
+                    getConfiguredBaseDamage();
+                    status.textContent = `Base damage set to ${autoMobFarmBaseDamage}.`;
+                });
+
+                mobTargetInput.addEventListener('change', function() {
+                    const target = getConfiguredMobTarget();
+                    const targets = parseConfiguredMobTargets(target);
+                    status.textContent = targets.length > 0
+                        ? `Mob targets set: ${targets.join(', ')}.`
+                        : 'Mob target cleared. Targeting any mob in selected wave.';
+                });
+
                 waveSelect.addEventListener('change', function() {
                     const targetWave = getConfiguredWaveTarget();
                     status.textContent = targetWave === 'current'
@@ -1319,7 +1527,9 @@
                     }
 
                     const damage = getConfiguredDamage();
+                    const baseDamage = getConfiguredBaseDamage();
                     const waveTarget = getConfiguredWaveTarget();
+                    const mobTarget = getConfiguredMobTarget();
                     const targetWaveUrl = getTargetWaveUrl(waveTarget);
 
                     if (currentPath === '/active_wave.php') {
@@ -1348,12 +1558,17 @@
                         saveRecentBattles(recentMap);
                         const blockedIds = new Set(Object.keys(recentMap));
 
-                        const joinControl = findJoinBattleControl(document, blockedIds);
+                        const joinControl = findJoinBattleControl(document, blockedIds, mobTarget);
                         if (!joinControl) {
                             const now = Date.now();
-                            status.textContent = blockedIds.size > 0
-                                ? 'All visible monsters were recently handled. Waiting for new targets...'
-                                : 'No joinable monster found in target wave.';
+                            const mobTargets = parseConfiguredMobTargets(mobTarget);
+                            if (mobTargets.length > 0) {
+                                status.textContent = `No joinable targets (${mobTargets.join(', ')}) found in target wave.`;
+                            } else {
+                                status.textContent = blockedIds.size > 0
+                                    ? 'All visible monsters were recently handled. Waiting for new targets...'
+                                    : 'No joinable monster found in target wave.';
+                            }
 
                             if (now - lastWaitingRefreshAt >= 10 * 1000) {
                                 lastWaitingRefreshAt = now;
@@ -1374,12 +1589,14 @@
                             localStorage.setItem('autoMobFarmCurrentBattleId', battleId);
                         }
 
-                        status.textContent = `Joining next monster (wave ${waveTarget === 'current' ? currentParams.wave || 'current' : waveTarget}). Damage per hit: ${damage}.`;
+                        const mobTargets = parseConfiguredMobTargets(mobTarget);
+                        const mobTargetLabelText = mobTargets.length > 0 ? ` | Mob targets: ${mobTargets.join(', ')}` : '';
+                        status.textContent = `Joining next monster (wave ${waveTarget === 'current' ? currentParams.wave || 'current' : waveTarget}). Damage per hit: ${damage}.${mobTargetLabelText}`;
                         farmActionBusy = true;
                         setTimeout(() => {
                             farmActionBusy = false;
                         }, 3000);
-                        joinControl.click();
+                        safeControlClick(joinControl);
                         return;
                     }
 
@@ -1395,9 +1612,8 @@
 
                         const dmgInput = findDamageInput(document);
                         const attackControl = findAttackControl(document);
-                        const slashControl = findSlashControl(document);
-
                         const currentDamage = parseCurrentBattleDamage(document);
+                        const bestSlash = findBestSlashControl(document, currentDamage, damage, baseDamage);
                         if (currentDamage !== null && currentDamage >= damage) {
                             markBattleHandled(trackedBattleId);
                             status.textContent = `Target damage reached (${currentDamage}/${damage}). Moving to next monster...`;
@@ -1411,7 +1627,7 @@
                             return;
                         }
 
-                        if ((!dmgInput || !attackControl) && !slashControl) {
+                        if ((!dmgInput || !attackControl) && !bestSlash) {
                             const fromRef = document.referrer || '';
                             const params = parseQueryParamsFromHref(fromRef);
                             if (fromRef.includes('/active_wave.php') && params.gate && params.wave) {
@@ -1432,9 +1648,15 @@
 
                         const now = Date.now();
                         if (now - lastBattleAttackAt < 900) {
-                            status.textContent = currentDamage === null
-                                ? 'Waiting for damage update...'
-                                : `Current damage ${currentDamage}/${damage}.`;
+                            if (bestSlash && currentDamage !== null) {
+                                const est = Math.max(1, baseDamage) * bestSlash.multiplier;
+                                const remaining = Math.max(0, damage - currentDamage);
+                                status.textContent = `Chosen: ${bestSlash.name} (${est.toLocaleString()}) | Remaining: ${remaining.toLocaleString()} (${currentDamage.toLocaleString()}/${damage.toLocaleString()})`;
+                            } else {
+                                status.textContent = currentDamage === null
+                                    ? 'Waiting for damage update...'
+                                    : `Current damage ${currentDamage.toLocaleString()}/${damage.toLocaleString()}.`;
+                            }
                             return;
                         }
 
@@ -1444,12 +1666,18 @@
                             dmgInput.dispatchEvent(new Event('change', { bubbles: true }));
                         }
 
-                        if (slashControl) {
+                        if (bestSlash) {
+                            const estDamageValue = Math.max(1, baseDamage) * bestSlash.multiplier;
+                            const remainingValue = currentDamage === null ? null : Math.max(0, damage - currentDamage);
+                            const estDamage = estDamageValue.toLocaleString();
                             status.textContent = currentDamage === null
-                                ? 'Using Slash...'
-                                : `Using Slash. Current damage ${currentDamage}/${damage}.`;
+                                ? `Chosen: ${bestSlash.name} (${estDamage}) | Remaining: unknown`
+                                : `Chosen: ${bestSlash.name} (${estDamage}) | Remaining: ${remainingValue.toLocaleString()} (${currentDamage.toLocaleString()}/${damage.toLocaleString()})`;
                             lastBattleAttackAt = now;
-                            slashControl.click();
+                            const clicked = safeControlClick(bestSlash.el);
+                            if (!clicked) {
+                                status.textContent = `Found ${bestSlash.name}, but click failed.`;
+                            }
                             return;
                         }
 
@@ -1457,7 +1685,7 @@
                             ? `Attacking with ${damage} damage.`
                             : `Attacking. Current damage ${currentDamage}/${damage}.`;
                         lastBattleAttackAt = now;
-                        attackControl.click();
+                        safeControlClick(attackControl);
                         return;
                     }
 
@@ -1467,8 +1695,17 @@
                 updateToggle();
                 status.textContent = autoMobFarmEnabled ? 'Auto mob farm enabled.' : 'Auto mob farm disabled.';
 
-                setInterval(farmLoop, 1300);
-                farmLoop();
+                const runFarmLoopSafely = async () => {
+                    try {
+                        await farmLoop();
+                    } catch (error) {
+                        console.error('Auto mob farm loop error:', error);
+                        status.textContent = `Auto mob farm error: ${String(error && error.message ? error.message : error).slice(0, 90)}`;
+                    }
+                };
+
+                setInterval(runFarmLoopSafely, 1300);
+                runFarmLoopSafely();
             }
 
             let containerAppended = false;
@@ -2186,7 +2423,7 @@
                         csrfToken = extractTokenFromDoc(chapterContext.doc);
                         hiddenFields = extractHiddenFields(chapterContext.doc);
                         internalChapterId = extractInternalChapterIdFromDoc(chapterContext.doc);
-                        
+
                         console.log(`[COLLECTOR] Loaded chapter ${chapterId}. Internal ID: ${internalChapterId || 'NOT FOUND'}`);
 
                         try {
@@ -2219,9 +2456,9 @@
                     // Use useruid as primary identifier (as per site's own JS code)
                     // Fallback to demon or reactID
                     const userUid = reactID || demonId || '';
-                    
+
                     console.log(`[COLLECTOR] Using UUIDs: reactID=${reactID}, demonId=${demonId}, fallback=${userUid}`);
-                    
+
                     // Try requests from the chapter iframe window so referrer/origin match chapter page context.
                     const payloadVariants = [
                         { useruid: userUid, chapterid: internalChapterId || chapterId, reaction },
@@ -2235,11 +2472,11 @@
                     let lastRaw = '';
                     let lastStatus = 0;
                     let attemptCount = 0;
-                    
+
                     for (const payload of payloadVariants) {
                         attemptCount++;
                         const body = new URLSearchParams();
-                        
+
                         // Only add non-empty values
                         Object.entries(payload).forEach(([k, v]) => {
                             if (v !== undefined && v !== null && String(v).length > 0) {
@@ -2284,7 +2521,7 @@
                             lastStatus = response.status;
                             const text = await response.text();
                             lastRaw = text;
-                            
+
                             console.log(`[COLLECTOR] Ch${chapterId} resp ${attemptCount}: ${response.status} - ${text.slice(0, 80)}`);
 
                             // Check for success on any 2xx response OR specific keywords
@@ -2471,13 +2708,16 @@
                         return;
                     }
 
-                    const slashControl = findSlashControl(document);
-                    if (!slashControl) {
+                    const currentDamage = parseCurrentBattleDamage(document);
+                    const targetDamage = Math.max(1, parseInt(localStorage.getItem('autoMobFarmDamage') || autoMobFarmDamage || '1', 10));
+                    const baseDamage = Math.max(1, parseInt(localStorage.getItem('autoMobFarmBaseDamage') || autoMobFarmBaseDamage || '1', 10));
+                    const bestSlash = findBestSlashControl(document, currentDamage, targetDamage, baseDamage);
+                    if (!bestSlash) {
                         return;
                     }
 
                     collectorSlashAssistLastClickAt = now;
-                    slashControl.click();
+                    safeControlClick(bestSlash.el);
                 }
 
                 async function backgroundCollectorLoop() {
@@ -2492,7 +2732,7 @@
                     const demonId = getCookieByName('demon');
                     const demonTemp = getCookieByName('demontemp');
                     let userUid = getCookieByName('useruid');
-                    
+
                     // Ensure useruid exists
                     if (!userUid) {
                         userUid = ensureUserUidCookie();
